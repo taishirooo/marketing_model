@@ -1,5 +1,13 @@
 # marketing_model
 
+# ===== 0. 必要ライブラリ =====
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+sns.set(style="whitegrid", font="IPAexGothic")  # 日本語対応（IPAexフォント）
+
 # ===== 1. 基本情報の確認 =====
 def basic_info(df):
     print("=== データ概要 ===")
