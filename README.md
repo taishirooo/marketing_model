@@ -539,6 +539,67 @@ joblib.dump(pipe, "logreg_pipeline.joblib")
 >
 > * 罰則を **L1（Lasso）** に変更してスパース化（特徴選択）
 > * `solver="saga"` にして大規模One-Hotでも高速化
+
+
+なるほど、
+つまり以下の流れですね。
+
+1. **ID × 月ごとのログイン回数** を集計
+2. **IDごとに月平均ログイン回数** を計算
+3. **IDごとに1行のデータフレーム** にまとめる
+
+コード例はこんな感じです。
+
+```python
+import pandas as pd
+
+# REGDATEを日付型に変換
+df_app_train["REGDATE"] = pd.to_datetime(df_app_train["REGDATE"])
+
+# 年月カラムを作成
+df_app_train["year_month"] = df_app_train["REGDATE"].dt.to_period("M")
+
+# ID × 月ごとのログイン回数
+monthly_login_count = (
+    df_app_train
+    .groupby(["ID", "year_month"])
+    .size()
+    .reset_index(name="login_count")
+)
+
+# IDごとの月平均ログイン回数
+id_monthly_avg = (
+    monthly_login_count
+    .groupby("ID")["login_count"]
+    .mean()
+    .reset_index(name="avg_monthly_login")
+)
+
+# 結果確認
+print(id_monthly_avg.head())
+```
+
+---
+
+### 出力例
+
+```
+    ID  avg_monthly_login
+0  101           4.333333
+1  102           2.500000
+2  103           6.000000
+...
+```
+
+---
+
+この `id_monthly_avg` は **IDごとに1行** で、
+「月ごとの利用率（回数）の平均」を持つデータフレームになります。
+
+もしこの結果を元の学習用データに **特徴量として追加** することもできますが、
+そうしますか？
+（明日のインターン用なら、そのほうがすぐモデルに使えます）
+
 > * グリッド/ベイズ最適化で `C`（正則化強度）を調整
 
 必要なら、このロジスティックとLightGBM/XGBoost/CatBoostの **共通OOF作成スクリプト** も用意できます。
