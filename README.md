@@ -297,3 +297,114 @@ df_filled_constant = impute_missing_values(df, numeric_cols, categorical_cols,
 もし希望なら、この欠損補完を **EDAテンプレートの前処理ステップ** に組み込んだ「前処理付きEDA版」にできます。
 そうするとインターン中、データ読み込み後すぐに欠損補完→EDA→仮説検証まで1本で流せますが、それにしますか？
 
+
+私なら、今回の仮説検証の流れを踏まえて、
+**「単変量で開設率に差が出た特徴」＋「仮説を数値化した派生変数」** を意識してロジスティック回帰の説明変数に組み込みます。
+特にロジスティック回帰は線形モデルなので、変数の作り方次第で予測力と解釈力が大きく変わります。
+
+---
+
+## 1. 仮説と特徴量の対応表
+
+| 仮説              | 特徴量（説明変数）例                                      | 理由                         |
+| --------------- | ----------------------------------------------- | -------------------------- |
+| ① アプリ利用頻度×若年層   | `APP_USE_FREQ`、`AGE`、`APP_USE_FREQ × (AGE<=30)` | 若年層×高頻度利用者が高開設率なら交互作用項で捉える |
+| ② SMBC利用頻度が高い顧客 | `SMBC_USE_COUNT`（給与振込、年金、公共料金などの合計フラグ数）         | サービス利用度が高い人はOlive開設意欲が高い   |
+| ③ 残高が多い富裕層      | `TOTAL_BAL`、`log(TOTAL_BAL+1)`                  | 総残高をスケール調整してモデルに入れる        |
+| ④ 特典活用層         | `TOTAL_SERVICE_COUNT`（引落＋受取＋アプリ＋ATMなどの合計）       | 多機能利用度を代理指標化               |
+| ⑤ 投資家・ビジネスマン    | `JOB_TYPE`（カテゴリ型）＋`INVEST_BAL`（投資口座残高）          | 職種と投資傾向を反映                 |
+| ⑥ 三井住友カード保有数    | `SMBC_CARD_COUNT`、`CARD_COUNT_BIN`（枚数カテゴリ）      | 枚数と開設率の非線形関係を捉える           |
+| ⑦ ATMサービス利用者    | `ATM_USE_FREQ`                                  | 利用頻度と開設意欲の関連性              |
+
+---
+
+## 2. 実際に追加したい説明変数
+
+### (A) 金融資産関連
+
+```python
+df["TOTAL_BAL"] = df[["BAL1","BAL2","BAL3","BAL4","BAL5"]].sum(axis=1)
+df["LOG_TOTAL_BAL"] = np.log1p(df["TOTAL_BAL"])  # スケーリングして非線形対応
+df["INVEST_BAL"] = df["BAL4"] + df["BAL5"]       # 投資口座系残高の合計
+```
+
+---
+
+### (B) 利用習慣関連
+
+```python
+service_flags = ["PAYROLL_DEP","PENSION_RECV","WATER_PAY","NHK_PAY","PHONE_PAY","INSURANCE_PAY"]
+df["SMBC_USE_COUNT"] = df[service_flags].sum(axis=1)
+df["TOTAL_SERVICE_COUNT"] = df["SMBC_USE_COUNT"] + df["APP_USE_FREQ"] + df["ATM_USE_FREQ"]
+```
+
+---
+
+### (C) 属性カテゴリ化
+
+```python
+df["AGE_GROUP"] = pd.cut(df["AGE"],
+                         bins=[0,29,39,49,59,69,100],
+                         labels=["~29","30-39","40-49","50-59","60-69","70~"])
+df["CARD_COUNT_BIN"] = pd.cut(df["SMBC_CARD_COUNT"], bins=[-1,1,2,3,10], labels=["0-1","2","3","4+"])
+df["JOB_TYPE"] = df["JOB_TYPE"].fillna("不明")
+```
+
+---
+
+### (D) 交互作用（仮説①）
+
+```python
+df["YOUNG_APP_ACTIVE"] = ((df["AGE"] <= 30) & (df["APP_USE_FREQ"] >= df["APP_USE_FREQ"].median())).astype(int)
+```
+
+* 若年層かつアプリ利用頻度高い層を直接1/0で表現
+
+---
+
+### (E) 地域効果（仮説からの裏付け）
+
+```python
+branch_rate = df.groupby("BRANCH")["TARGET_FRG"].transform("mean")
+df["BRANCH_TARGET_RATE"] = branch_rate
+```
+
+* 支店ごとの過去開設率を数値化（集計は学習データのみで行う）
+
+---
+
+## 3. モデルに入れる際のポイント
+
+* ロジスティック回帰は **線形＋単調な関係を想定** するので、金額や頻度は `log1p()` やビニングで変換して非線形性に対応
+* カテゴリ変数は One-Hot または `category` 型＋エンコーディング
+* 交互作用は `×` ではなく、新しい列として事前に作る
+* 欠損値は適切に補完（職種は"不明"、金額系は0など）
+
+---
+
+## 4. 推奨する説明変数セット（例）
+
+```python
+explanatory_vars = [
+    # 金融資産
+    "LOG_TOTAL_BAL", "INVEST_BAL",
+    # 利用習慣
+    "SMBC_USE_COUNT", "TOTAL_SERVICE_COUNT",
+    # 属性
+    "AGE", "AGE_GROUP", "GENDER", "JOB_TYPE",
+    "CARD_COUNT_BIN", "SMBC_CARD_COUNT",
+    # 利用頻度
+    "APP_USE_FREQ", "ATM_USE_FREQ",
+    # 交互作用
+    "YOUNG_APP_ACTIVE",
+    # 地域
+    "BRANCH_TARGET_RATE"
+]
+```
+
+---
+
+もしよければ、この特徴量生成をまとめて行い、そのままロジスティック回帰に投入できる **前処理＋学習の一括コード** にして渡せます。
+そうすれば明日のインターンでデータを流すだけで検証→モデル構築まで一気にできますが、その形にしますか？
+
+
