@@ -407,4 +407,139 @@ explanatory_vars = [
 もしよければ、この特徴量生成をまとめて行い、そのままロジスティック回帰に投入できる **前処理＋学習の一括コード** にして渡せます。
 そうすれば明日のインターンでデータを流すだけで検証→モデル構築まで一気にできますが、その形にしますか？
 
+いいね、ロジスティック回帰に進みましょう。
+下は **前処理 → 学習 → 評価 → 係数の解釈 → 予測の保存** まで一発で回るテンプレです。
+（`numeric_cols` / `categorical_cols` はあなたの環境のリストをそのまま使ってください）
+
+```python
+# === 0) ライブラリ ===
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, average_precision_score, confusion_matrix, classification_report
+)
+from sklearn.impute import SimpleImputer
+
+# === 1) 入力（あなたの df_train / 列名を使用） ===
+target_col = "TARGET_FRG"
+# numeric_cols = [...]
+# categorical_cols = [...]
+
+X = df_train[numeric_cols + categorical_cols].copy()
+y = df_train[target_col].astype(int).copy()
+
+# === 2) 前処理: 欠損補完 + スケーリング + One-Hot ===
+num_pipe = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median")),   # 平均なら "mean"
+    ("scaler",  StandardScaler())
+])
+
+# 高カードinalityに強い one-hot（頻度の低いカテゴリはまとめる）
+cat_pipe = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("ohe", OneHotEncoder(handle_unknown="ignore", min_frequency=20, sparse=False))
+])
+
+preprocess = ColumnTransformer(
+    transformers=[
+        ("num", num_pipe, numeric_cols),
+        ("cat", cat_pipe, categorical_cols)
+    ],
+    remainder="drop"
+)
+
+# === 3) モデル本体（不均衡対応の重み付け） ===
+logreg = LogisticRegression(
+    penalty="l2",            # L1にすると特徴選択にも効く：'l1', solver='liblinear' or saga
+    class_weight="balanced", # 不均衡に強くする
+    max_iter=2000,
+    n_jobs=-1,
+    solver="lbfgs"           # 高次元でも安定
+)
+
+# === 4) パイプライン ===
+pipe = Pipeline(steps=[
+    ("preprocess", preprocess),
+    ("clf", logreg)
+])
+
+# === 5) ホールドアウト評価 ===
+X_train, X_val, y_train, y_val = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+pipe.fit(X_train, y_train)
+proba = pipe.predict_proba(X_val)[:, 1]
+pred  = (proba >= 0.5).astype(int)
+
+metrics = {
+    "accuracy": accuracy_score(y_val, pred),
+    "precision": precision_score(y_val, pred),
+    "recall": recall_score(y_val, pred),
+    "f1": f1_score(y_val, pred),
+    "roc_auc": roc_auc_score(y_val, proba),
+    "pr_auc": average_precision_score(y_val, proba),
+}
+print({k: round(v, 4) for k, v in metrics.items()})
+print("\nConfusion matrix:\n", confusion_matrix(y_val, pred))
+print("\nReport:\n", classification_report(y_val, pred, digits=4))
+
+# === 6) 5Fold CV（AUCの安定度チェック） ===
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+cv_auc = cross_val_score(pipe, X, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+print(f"\nCV ROC-AUC: mean={cv_auc.mean():.4f}, std={cv_auc.std():.4f}, folds={cv_auc}")
+
+# === 7) 係数の解釈（オッズ比）
+#  前処理後の特徴名を抽出 → 係数をオッズ比に変換
+pipe.fit(X_train, y_train)
+# ColumnTransformer経由の特徴名
+ohe = pipe.named_steps["preprocess"].named_transformers_["cat"].named_steps["ohe"]
+cat_features = ohe.get_feature_names_out(categorical_cols)
+num_features = np.array(numeric_cols)
+feature_names = np.concatenate([num_features, cat_features])
+
+coefs = pipe.named_steps["clf"].coef_.ravel()
+odds_ratio = np.exp(coefs)
+coef_df = pd.DataFrame({
+    "feature": feature_names,
+    "coef": coefs,
+    "odds_ratio": odds_ratio
+}).sort_values("odds_ratio", ascending=False)
+print("\nTop positive (odds_ratio):")
+print(coef_df.head(15))
+print("\nTop negative (odds_ratio):")
+print(coef_df.tail(15))
+
+# === 8) アンサンブル用にバリデーション予測を保存 ===
+oof_df = pd.DataFrame({
+    "y_true": y_val.reset_index(drop=True),
+    "lr_pred_proba": pd.Series(proba).reset_index(drop=True),
+    "lr_pred_label": pd.Series(pred).reset_index(drop=True),
+})
+oof_df.to_csv("logreg_val_predictions.csv", index=False)
+
+# パイプラインをそのまま保存（joblib推奨）
+import joblib
+joblib.dump(pipe, "logreg_pipeline.joblib")
+```
+
+### 使い方・ポイント
+
+* **不均衡対応**：`class_weight="balanced"` を指定済み。必要なら閾値0.5を調整して F1 / Recall を改善してもOK。
+* **高次元One-Hot**：`min_frequency=20` でレアカテゴリを自動集約（列爆発を抑制）。
+* **係数の解釈**：`odds_ratio = exp(coef)`。1より大きければ開設確率を押し上げる方向、小さければ下げる方向。
+* **アンサンブル準備**：OOF（検証）予測をCSVに保存。後で LightGBM / XGBoost のOOFと横持ちしてブレンディング可能。
+
+> さらに精度を上げたい場合
+>
+> * 罰則を **L1（Lasso）** に変更してスパース化（特徴選択）
+> * `solver="saga"` にして大規模One-Hotでも高速化
+> * グリッド/ベイズ最適化で `C`（正則化強度）を調整
+
+必要なら、このロジスティックとLightGBM/XGBoost/CatBoostの **共通OOF作成スクリプト** も用意できます。
 
