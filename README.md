@@ -911,4 +911,62 @@ top250_w.to_csv("test_top250_weighted.csv", index=False)
 
 
 必要なら、このロジスティックとLightGBM/XGBoost/CatBoostの **共通OOF作成スクリプト** も用意できます。
+やりたいのは「テストの全IDに対して、予測確率の高い上位250件だけ `TARGET_FLG=1`、残りは `0`」という**1行/IDの提出データ**ですよね。
+下のコードで作れます（重複IDがあっても安全に動くように書いています）。
+
+```python
+import numpy as np
+import pandas as pd
+import joblib
+
+# ===== 前提 =====
+features = numeric_cols + categorical_cols
+id_col = "ID"
+
+# モデル読み込み（既にメモリにあるなら不要）
+pipe_lr  = joblib.load("model_lr.joblib")
+pipe_rf  = joblib.load("model_rf.joblib")
+pipe_lgb = joblib.load("model_lgb.joblib")
+
+# ===== テスト列合わせ =====
+X_test = df_test.copy()
+missing_cols = [c for c in features if c not in X_test.columns]
+for c in missing_cols:
+    X_test[c] = np.nan
+X_test = X_test[features]
+
+# ===== 予測確率（単純平均）=====
+proba_lr  = pipe_lr.predict_proba(X_test)[:, 1]
+proba_rf  = pipe_rf.predict_proba(X_test)[:, 1]
+proba_lgb = pipe_lgb.predict_proba(X_test)[:, 1]
+ens_proba = np.column_stack([proba_lr, proba_rf, proba_lgb]).mean(axis=1)
+
+# ===== IDごとに1行に正規化（重複ID対策）=====
+# 同一IDで複数行ある場合は、確率の最大値で代表（他でも良いが一貫させる）
+pred_df = pd.DataFrame({id_col: df_test[id_col].values, "proba_mean": ens_proba})
+id_pred = (pred_df
+           .groupby(id_col, as_index=False)["proba_mean"]
+           .max()
+           .sort_values("proba_mean", ascending=False))
+
+# ===== 上位250件を1、残りを0 =====
+top_k = 250
+top_ids = set(id_pred.head(top_k)[id_col])
+
+submission = id_pred[[id_col]].copy()
+submission["TARGET_FLG"] = submission[id_col].isin(top_ids).astype(int)
+
+# 念のため件数チェック（例：1000行なら 1が250、0が750）
+print(submission["TARGET_FLG"].value_counts())
+
+# 保存
+submission.to_csv("submission_top250_flag.csv", index=False)
+submission.head()
+```
+
+### 補足
+
+* **重複IDがなければ** `groupby` 部分は単に並べ替えて上位を1にするだけでOKです。
+* 「どの行を代表にするか」はポリシー次第（`max`/`mean`/`median` 等）。上は「最も高い確率」を代表にしました。
+* もし本当に\*\*「同じIDで 1 と 0 の2行を作る」**仕様なら、別の生成が必要ですが、通常の提出は**IDごとに1行\*\*が一般的です。
 
