@@ -210,4 +210,90 @@ def create_features(df):
 もし希望なら、この関数を組み込んだ「**前処理＋特徴量作成＋LightGBM学習の一括ノート**」にまとめられます。
 そうすれば明日のインターンで即分析に入れますが、その形にしますか？
 
-     
+了解です。
+では、**欠損値補完用の汎用テンプレート** を作ります。
+このテンプレは、数値変数・カテゴリ変数の両方に対応し、**平均値 / 中央値 / 最頻値** での補完方法を簡単に切り替えられます。
+
+---
+
+## 欠損値補完テンプレート
+
+```python
+import pandas as pd
+import numpy as np
+from sklearn.impute import SimpleImputer
+
+def impute_missing_values(df, numeric_cols=None, categorical_cols=None,
+                          num_strategy="mean", cat_strategy="most_frequent"):
+    """
+    欠損値を数値列とカテゴリ列で分けて補完する関数
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        補完対象のデータフレーム
+    numeric_cols : list
+        数値型カラム名リスト
+    categorical_cols : list
+        カテゴリ型カラム名リスト
+    num_strategy : str
+        数値の補完方法 ("mean", "median", "most_frequent", "constant")
+    cat_strategy : str
+        カテゴリの補完方法 ("most_frequent", "constant")
+    
+    Returns
+    -------
+    pd.DataFrame : 補完後のデータフレーム
+    """
+    df_copy = df.copy()
+
+    # ===== 数値列の補完 =====
+    if numeric_cols:
+        num_imputer = SimpleImputer(strategy=num_strategy)
+        df_copy[numeric_cols] = num_imputer.fit_transform(df_copy[numeric_cols])
+
+    # ===== カテゴリ列の補完 =====
+    if categorical_cols:
+        cat_imputer = SimpleImputer(strategy=cat_strategy)
+        df_copy[categorical_cols] = cat_imputer.fit_transform(df_copy[categorical_cols])
+
+    return df_copy
+```
+
+---
+
+## 使用例
+
+```python
+# 数値・カテゴリ列の指定
+numeric_cols = ["AGE", "BAL1", "BAL2", "BAL3", "BAL4", "BAL5", "SMBC_CARD_COUNT"]
+categorical_cols = ["GENDER", "HOUSEHOLD_HEAD", "JOB_TYPE", "PREFECTURE"]
+
+# 平均値で数値補完、最頻値でカテゴリ補完
+df_filled = impute_missing_values(df, numeric_cols, categorical_cols,
+                                  num_strategy="mean", cat_strategy="most_frequent")
+
+# 中央値で数値補完
+df_filled_median = impute_missing_values(df, numeric_cols, categorical_cols,
+                                         num_strategy="median", cat_strategy="most_frequent")
+
+# 特定値で補完（例：数値は0、カテゴリは"不明"）
+df_filled_constant = impute_missing_values(df, numeric_cols, categorical_cols,
+                                           num_strategy="constant", cat_strategy="constant")
+```
+
+---
+
+## 補足
+
+* **平均値補完**：外れ値に弱いが、分布の中心を維持できる
+* **中央値補完**：外れ値に強い（スキューのある変数に有効）
+* **最頻値補完**：カテゴリや2値変数で有効
+* **定数補完**：分析上、欠損を明示的に残したい場合に有効（例："不明"カテゴリ）
+
+---
+
+この関数を使えば、**変数リストと戦略を指定するだけで欠損補完が一括**でできます。
+もし希望なら、この欠損補完を **EDAテンプレートの前処理ステップ** に組み込んだ「前処理付きEDA版」にできます。
+そうするとインターン中、データ読み込み後すぐに欠損補完→EDA→仮説検証まで1本で流せますが、それにしますか？
+
